@@ -52,20 +52,20 @@ def _sensor_resolution(resolution: Resolution) -> Any:
         case Resolution.R_4K:
             return enum.THE_4_K
 
-# Live-preview stream parameters. These are deliberately small so the MJPEG
-# encoder runs cheap on the OAK and the resulting stream is reasonable to
-# send over a Wi-Fi AP to a phone or a browser on the LAN.
-# Live preview target resolution. Much smaller than the storage resolution
-# so the MJPEG encoder doesn't flood the USB bus with multi-hundred-KB
-# frames on top of the H265 stream.
-_PREVIEW_WIDTH = 640
-_PREVIEW_HEIGHT = 360
-# Frames per second delivered to live-preview subscribers. The MJPEG
-# encoder runs at the camera's sensor fps (usually 30) because we share
-# its input with the storage encoder, but the worker thread publishes
-# only 1-in-N frames so the HTTP stream stays light on bandwidth.
-# With 30 fps sensor / 10 fps preview we publish 1-in-3 frames.
-_PREVIEW_TARGET_FPS = 10.0
+# Live-preview stream parameters. These are deliberately small so the
+# MJPEG encoder runs cheap on the OAK and the resulting stream is
+# reasonable to send over a Wi-Fi AP to a phone or a browser on the LAN.
+# 480x270 is 1/4 resolution linearly, 1/16 in pixel count — well under
+# what you can see on a phone screen anyway, and at 30 fps the resulting
+# bandwidth is ~3-5 Mbps per camera which fits comfortably inside USB 2.0
+# even with two cameras recording H.265 simultaneously.
+#
+# The MJPEG encoder runs at the same fps as the storage stream (sensor
+# fps, typically 30) — this gives smooth motion in the preview and
+# keeps the pipeline simple: no rate division, no worker-side skip
+# logic, the encoder does what the camera tells it.
+_PREVIEW_WIDTH = 480
+_PREVIEW_HEIGHT = 270
 # How many frames each browser subscriber buffers before frames get
 # dropped. Four is enough to hide a momentary WebSocket hiccup without
 # letting a stalled client back-pressure the MJPEG worker.
@@ -337,11 +337,14 @@ class DepthAICamera:
             preview_manip.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
             color_cam.preview.link(preview_manip.inputImage)
 
-            # Preview encoder: MJPEG at a low target fps to keep
-            # encoder + USB work modest.
+            # Preview encoder: MJPEG at the full sensor fps. The preview
+            # frames are tiny (_PREVIEW_WIDTH x _PREVIEW_HEIGHT, already
+            # downscaled on the ISP) so the aggregate encoder + USB work
+            # is well inside the Pi 4's USB 2.0 headroom even with two
+            # cameras running.
             preview_encoder = pipeline.create(dai.node.VideoEncoder)
             preview_encoder.setDefaultProfilePreset(
-                _PREVIEW_TARGET_FPS,
+                float(self._cfg.fps),
                 dai.VideoEncoderProperties.Profile.MJPEG,
             )
             preview_manip.out.link(preview_encoder.input)
@@ -396,12 +399,6 @@ class DepthAICamera:
         `call_soon_threadsafe`.
         """
         log.info("camera %s: preview MJPEG worker started", self._cfg.id)
-        # The MJPEG encoder runs at the sensor fps because it shares the
-        # same `camera_output` as the H265 encoder. We downsample here
-        # to `_PREVIEW_TARGET_FPS` by publishing every Nth frame — max(1, …)
-        # guards against configs where target fps ≥ sensor fps.
-        skip_stride = max(1, round(self._cfg.fps / _PREVIEW_TARGET_FPS))
-        frame_counter = 0
         try:
             while not self._stop_flag.is_set():
                 try:
@@ -411,9 +408,6 @@ class DepthAICamera:
                     break
                 if packet is None:
                     continue
-                frame_counter += 1
-                if frame_counter % skip_stride != 0:
-                    continue  # downsample to ~target fps
                 if not self._preview_subscribers:
                     # Nobody watching — skip the bytes conversion to save work.
                     continue
