@@ -313,6 +313,21 @@ class DepthAICamera:
             color_cam.setPreviewSize(_PREVIEW_WIDTH, _PREVIEW_HEIGHT)
             color_cam.setInterleaved(False)
 
+            # 180° rotation for ceiling-mounted cameras. Handled at the
+            # ColorCamera ISP level so both the recording and preview
+            # branches see an already-flipped frame — no extra
+            # ImageManip, no extra VPU cost. Only 0° and 180° are
+            # supported; see the comment on `CameraConfig.rotation_degrees`.
+            if self._cfg.rotation_degrees == 180:
+                color_cam.setImageOrientation(
+                    dai.CameraImageOrientation.ROTATE_180_DEG
+                )
+            log.info(
+                "camera %s: rotation configured to %d deg",
+                self._cfg.id,
+                self._cfg.rotation_degrees,
+            )
+
             # Storage encoder: full-res H.265 off the `.video` output.
             encoder = pipeline.create(dai.node.VideoEncoder)
             encoder.setDefaultProfilePreset(

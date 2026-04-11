@@ -29,6 +29,7 @@ import logging
 import mimetypes
 import os
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -57,6 +58,7 @@ class CameraOut(BaseModel):
     fps: int
     codec: Codec
     bitrate_kbps: int
+    rotation_degrees: Literal[0, 180] = 0
 
 
 class CameraCreate(BaseModel):
@@ -67,6 +69,7 @@ class CameraCreate(BaseModel):
     fps: int = Field(default=30, ge=1, le=60)
     codec: Codec = Codec.H265
     bitrate_kbps: int = Field(default=8000, ge=500, le=50000)
+    rotation_degrees: Literal[0, 180] = 0
 
 
 class CameraUpdate(BaseModel):
@@ -78,6 +81,7 @@ class CameraUpdate(BaseModel):
     fps: int = Field(ge=1, le=60)
     codec: Codec
     bitrate_kbps: int = Field(ge=500, le=50000)
+    rotation_degrees: Literal[0, 180] = 0
 
 
 class MutationResult(BaseModel):
@@ -206,12 +210,13 @@ def create_app(
     @app.get("/api/segments", response_model=list[SegmentOut])
     async def list_segments(
         camera: str | None = Query(default=None),
-        limit: int = Query(default=100, ge=1, le=1000),
+        limit: int = Query(default=500, ge=1, le=2000),
+        before: datetime | None = Query(default=None),
     ) -> list[SegmentOut]:
         records = (
-            index.list_by_camera(camera, limit=limit)
+            index.list_by_camera(camera, limit=limit, before=before)
             if camera is not None
-            else index.list_all(limit=limit)
+            else index.list_all(limit=limit, before=before)
         )
         return [
             SegmentOut(
@@ -305,6 +310,68 @@ def create_app(
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 
+    @app.post("/api/cameras/{camera_id}/rotate", response_model=MutationResult)
+    async def rotate_camera(camera_id: str) -> MutationResult:
+        """Toggle camera rotation between 0° and 180° and auto-reset.
+
+        Simpler than asking the user to edit the camera form: one
+        button, two states. We update the DB row, then kick the
+        capture sidecar's reset endpoint so the supervisor restarts
+        the camera and picks up the new rotation_degrees value. The
+        ~5-10s gap that reset produces is the only visible downtime.
+        """
+        cam = store.get(camera_id)
+        if cam is None:
+            raise HTTPException(
+                status_code=404, detail=f"camera {camera_id!r} not found"
+            )
+        new_rotation = 0 if cam.rotation_degrees == 180 else 180
+        updated = cam.model_copy(update={"rotation_degrees": new_rotation})
+        store.update(updated)
+
+        # Fire-and-forget the reset request against capture. Failures
+        # here are non-fatal — the rotation is already persisted and
+        # will take effect on the next supervisor restart even if we
+        # can't reach the sidecar right now.
+        reset_url = f"{discovery_url}/live/{camera_id}/reset"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(reset_url)
+        except httpx.RequestError as exc:
+            log.warning(
+                "rotation saved for %s but sidecar reset failed: %s",
+                camera_id,
+                exc,
+            )
+
+        return MutationResult(camera=_camera_to_out(updated))
+
+    @app.post("/api/cameras/{camera_id}/reset")
+    async def reset_camera_endpoint(camera_id: str) -> Response:
+        """Proxy through to the capture sidecar's reset endpoint.
+
+        Triggers `camera.stop()` on the running DepthAICamera, which
+        exits the recording pipeline and lets the supervisor's
+        restart-on-crash loop bring it back up after the normal
+        backoff. Returns as soon as capture acks the request — the
+        actual restart takes ~5-10 seconds during which the live
+        preview tile will show the last cached frame.
+        """
+        url = f"{discovery_url}/live/{camera_id}/reset"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url)
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"capture sidecar unreachable at {url}: {exc}",
+            ) from exc
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=resp.headers.get("content-type", "application/json"),
+        )
+
     @app.get("/api/live/{camera_id}/preview.mjpeg")
     async def live_preview(camera_id: str) -> StreamingResponse:
         """Proxy the live MJPEG preview of a recording camera.
@@ -373,6 +440,7 @@ def _camera_to_out(cam: CameraConfig) -> CameraOut:
         fps=cam.fps,
         codec=cam.codec,
         bitrate_kbps=cam.bitrate_kbps,
+        rotation_degrees=cam.rotation_degrees,
     )
 
 

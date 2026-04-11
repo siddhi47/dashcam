@@ -9,6 +9,7 @@ const EMPTY_FORM: CameraCreate = {
   fps: 30,
   codec: "h265",
   bitrate_kbps: 8000,
+  rotation_degrees: 0,
 };
 
 export function CamerasPage() {

@@ -217,6 +217,179 @@ def test_list_segments_filters_by_camera(
     assert len(all_resp.json()) == 2
 
 
+def test_rotate_camera_toggles_0_to_180_and_back(
+    monkeypatch: pytest.MonkeyPatch,
+    app_env: tuple[TestClient, CameraStore, SegmentIndex, Path],
+) -> None:
+    client, store, *_ = app_env
+
+    # Stub out the httpx call that tries to ping the capture sidecar
+    # so the test runs without a real capture process.
+    class _StubResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+
+    class _StubAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def post(self, url: str) -> _StubResponse:
+            return _StubResponse()
+
+    from oak_dashcam_webapp import app as app_module
+
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", _StubAsyncClient)
+
+    # Seed camera starts at 0° (default).
+    cam_before = store.get("front")
+    assert cam_before is not None
+    assert cam_before.rotation_degrees == 0
+
+    # First rotate → 180°.
+    resp1 = client.post("/api/cameras/front/rotate")
+    assert resp1.status_code == 200
+    body1 = resp1.json()
+    assert body1["camera"]["rotation_degrees"] == 180
+    assert body1["restart_required"] is True
+    assert store.get("front").rotation_degrees == 180  # type: ignore[union-attr]
+
+    # Second rotate → back to 0°.
+    resp2 = client.post("/api/cameras/front/rotate")
+    assert resp2.status_code == 200
+    assert resp2.json()["camera"]["rotation_degrees"] == 0
+    assert store.get("front").rotation_degrees == 0  # type: ignore[union-attr]
+
+
+def test_rotate_unknown_camera_is_404(
+    app_env: tuple[TestClient, CameraStore, SegmentIndex, Path],
+) -> None:
+    client, *_ = app_env
+    assert client.post("/api/cameras/nope/rotate").status_code == 404
+
+
+def test_rotate_tolerates_sidecar_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    app_env: tuple[TestClient, CameraStore, SegmentIndex, Path],
+) -> None:
+    """Rotation must persist even if the capture sidecar is down.
+
+    The sidecar reset is a courtesy kick — the supervisor will pick
+    up the new rotation on the next boot regardless. A 503 from the
+    sidecar shouldn't roll the DB update back.
+    """
+    client, store, *_ = app_env
+
+    class _FailingAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FailingAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def post(self, url: str) -> object:
+            raise httpx.RequestError("sidecar offline")
+
+    import httpx
+    from oak_dashcam_webapp import app as app_module
+
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", _FailingAsyncClient)
+
+    resp = client.post("/api/cameras/front/rotate")
+    # Still 200 — the rotation was persisted before the failed kick.
+    assert resp.status_code == 200
+    assert store.get("front").rotation_degrees == 180  # type: ignore[union-attr]
+
+
+def test_reset_camera_endpoint_proxies_to_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    app_env: tuple[TestClient, CameraStore, SegmentIndex, Path],
+) -> None:
+    client, *_ = app_env
+
+    # Stub out httpx.AsyncClient so the test doesn't try to reach
+    # http://capture:8081 (which isn't running in tests).
+    calls: list[str] = []
+
+    class _StubResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.content = b'{"status":"resetting","camera_id":"front"}'
+            self.headers = {"content-type": "application/json"}
+
+    class _StubAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def post(self, url: str) -> _StubResponse:
+            calls.append(url)
+            return _StubResponse()
+
+    from oak_dashcam_webapp import app as app_module
+
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", _StubAsyncClient)
+
+    resp = client.post("/api/cameras/front/reset")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "resetting", "camera_id": "front"}
+    assert len(calls) == 1
+    assert calls[0].endswith("/live/front/reset")
+
+
+def test_list_segments_before_query_param_pages(
+    app_env: tuple[TestClient, CameraStore, SegmentIndex, Path],
+) -> None:
+    client, _store, index, storage_root = app_env
+    base = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+    from datetime import timedelta
+
+    for i in range(5):
+        rel = _make_segment(storage_root, "front", f"{i:02}.mp4", b"x")
+        index.insert(
+            SegmentRecord(
+                camera_id="front",
+                path=rel,
+                started_at=base + timedelta(minutes=i),
+                duration_s=60.0,
+                size_bytes=1,
+                codec="h265",
+            )
+        )
+
+    first = client.get("/api/segments?limit=2").json()
+    assert len(first) == 2
+    # Newest first: minutes 4 then 3.
+    assert first[0]["started_at"].startswith("2026-04-10T12:04:")
+
+    # The ISO timestamp contains a `+` for the UTC offset which becomes a
+    # literal space once URL-decoded, so we need httpx `params=` to do the
+    # encoding for us rather than string-interpolating into the URL.
+    oldest_on_first_page = first[-1]["started_at"]
+    older = client.get(
+        "/api/segments",
+        params={"limit": 10, "before": oldest_on_first_page},
+    ).json()
+    assert [r["started_at"][:19] for r in older] == [
+        "2026-04-10T12:02:00",
+        "2026-04-10T12:01:00",
+        "2026-04-10T12:00:00",
+    ]
+
+
 def test_protect_segment_flips_flag(
     app_env: tuple[TestClient, CameraStore, SegmentIndex, Path],
 ) -> None:

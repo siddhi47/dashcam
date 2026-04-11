@@ -52,6 +52,22 @@ def test_mjpeg_chunk_empty_payload() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _FakeCamera:
+    """Drop-in stand-in for DepthAICamera in tests.
+
+    Only implements what `create_discovery_app` actually calls on a
+    camera from the registry: currently, just `stop()`. Records the
+    call count so tests can assert the endpoint actually triggered
+    the reset path.
+    """
+
+    def __init__(self) -> None:
+        self.stop_count = 0
+
+    async def stop(self) -> None:
+        self.stop_count += 1
+
+
 class _StubDiscoveryService:
     """Minimal stand-in that doesn't touch DepthAI.
 
@@ -67,7 +83,11 @@ class _StubDiscoveryService:
         live_camera_ids: set[str] | None = None,
     ) -> None:
         self._cameras = cameras
-        self._live = live_camera_ids or set()
+        # Map camera_id -> _FakeCamera so the reset endpoint can call
+        # `.stop()` on a real object.
+        self.live_cameras: dict[str, _FakeCamera] = {
+            cid: _FakeCamera() for cid in (live_camera_ids or set())
+        }
 
     async def list_cameras(self) -> list[DiscoveredCamera]:
         return list(self._cameras)
@@ -77,10 +97,8 @@ class _StubDiscoveryService:
         # test below. This never opens a real device.
         yield _mjpeg_chunk(b"\xff\xd8test-jpeg\xff\xd9")
 
-    def get_camera(self, camera_id: str) -> object | None:
-        # Any non-None return value is enough for the endpoint's
-        # 404-or-stream branch; the real type would be DepthAICamera.
-        return object() if camera_id in self._live else None
+    def get_camera(self, camera_id: str) -> _FakeCamera | None:
+        return self.live_cameras.get(camera_id)
 
     async def stream_live_preview(self, camera_id: str) -> AsyncIterator[bytes]:
         yield _mjpeg_chunk(f"live:{camera_id}".encode())
@@ -144,6 +162,26 @@ def test_live_preview_endpoint_streams_mjpeg_for_registered_camera(
 
 def test_live_preview_endpoint_404_for_unknown_camera(stub_app: TestClient) -> None:
     resp = stub_app.get("/live/nope/preview.mjpeg")
+    assert resp.status_code == 404
+
+
+def test_reset_endpoint_calls_camera_stop() -> None:
+    # Need direct access to the stub to assert on the fake camera's
+    # stop_count, so we build a fresh app rather than using the
+    # shared fixture.
+    stub = _StubDiscoveryService(cameras=[], live_camera_ids={"front"})
+    client = TestClient(create_discovery_app(stub))  # type: ignore[arg-type]
+
+    resp = client.post("/live/front/reset")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "resetting"
+    assert body["camera_id"] == "front"
+    assert stub.live_cameras["front"].stop_count == 1
+
+
+def test_reset_endpoint_404_for_unknown_camera(stub_app: TestClient) -> None:
+    resp = stub_app.post("/live/nope/reset")
     assert resp.status_code == 404
 
 

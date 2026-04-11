@@ -149,37 +149,96 @@ form .full {
 
 .segment-list {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 320px 1fr;
   gap: 24px;
 }
 .segment-list .left {
-  max-height: 70vh;
+  max-height: 80vh;
   overflow-y: auto;
   border: 1px solid #1d212b;
   border-radius: 6px;
 }
-.segment-list .left button {
-  display: block;
+
+/* Collapsible date/hour group (native <details>/<summary>). */
+.segment-list .left details.group {
+  border-bottom: 1px solid #1d212b;
+}
+.segment-list .left details.group:last-child {
+  border-bottom: 0;
+}
+.segment-list .left .group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  background: #13171f;
+  list-style: none;
+}
+.segment-list .left .group-header::-webkit-details-marker {
+  display: none;
+}
+.segment-list .left .group-header::before {
+  content: "▸";
+  color: #5a6172;
+  margin-right: 6px;
+  font-size: 11px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.segment-list .left details[open] > .group-header::before {
+  transform: rotate(90deg);
+}
+.segment-list .left .group-header .group-meta {
+  color: #8892a7;
+  font-size: 11px;
+  font-weight: 400;
+}
+.segment-list .left .group-body {
+  background: #0a0d14;
+}
+/* Nested hour groups get a subtle indent so they're visually distinct. */
+.segment-list .left details.group-inner > .group-header {
+  padding-left: 24px;
+  background: #10141c;
+  font-size: 12px;
+  color: #b4bacd;
+}
+.segment-list .left details.group-inner .group-body {
+  padding-left: 12px;
+}
+
+/* Segment row — the clickable leaf node. */
+.segment-list .left button.seg-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   width: 100%;
   text-align: left;
-  padding: 10px 12px;
+  padding: 7px 12px 7px 36px;
   border: 0;
-  border-bottom: 1px solid #1d212b;
   background: transparent;
   color: #e6e8ec;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.segment-list .left button.selected {
+.segment-list .left button.seg-row:hover {
+  background: #151a24;
+}
+.segment-list .left button.seg-row.selected {
   background: #1a2230;
   color: #5aa9ff;
 }
-.segment-list .left button .meta {
-  display: block;
+.segment-list .left button.seg-row .meta {
   color: #8892a7;
-  font-size: 11px;
-  margin-top: 2px;
+  font-size: 10px;
+  font-family: -apple-system, system-ui, sans-serif;
 }
+
 .segment-list .right video {
   width: 100%;
   border-radius: 6px;

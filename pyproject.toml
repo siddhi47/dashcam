@@ -30,12 +30,18 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+# FastAPI idioms use `= Query(...)`, `= Depends(...)`, etc. in argument
+# defaults — that's how the library's dependency injection works. B008
+# flags those as "function call in default" which is wrong for FastAPI.
+extend-safe-fixes = []
 
 [tool.ruff.lint.per-file-ignores]
 # DepthAI's Python API uses camelCase method names. Test doubles and the
 # real wrapper must mirror those names exactly, so N802 is off in these files.
 "capture/src/oak_dashcam_capture/depthai_camera.py" = ["N802"]
 "capture/tests/test_depthai_camera.py" = ["N802"]
+# FastAPI's route handlers use `Query(...)` as default values by design.
+"webapp/backend/src/oak_dashcam_webapp/app.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

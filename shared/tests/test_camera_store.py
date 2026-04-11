@@ -98,3 +98,85 @@ def test_store_persists_across_reopens(tmp_path: Path) -> None:
     db = tmp_path / "dashcam.db"
     CameraStore(db).insert(_cam(id="front", mxid="ABC"))
     assert CameraStore(db).get("front") is not None  # type: ignore[union-attr]
+
+
+def test_rotation_default_is_zero(tmp_path: Path) -> None:
+    store = CameraStore(tmp_path / "dashcam.db")
+    store.insert(_cam(id="front"))
+    cam = store.get("front")
+    assert cam is not None
+    assert cam.rotation_degrees == 0
+
+
+def test_rotation_insert_and_update(tmp_path: Path) -> None:
+    store = CameraStore(tmp_path / "dashcam.db")
+    cam = CameraConfig(
+        id="front",
+        role=CameraRole.FRONT,
+        rotation_degrees=180,
+    )
+    store.insert(cam)
+    assert store.get("front").rotation_degrees == 180  # type: ignore[union-attr]
+
+    updated = cam.model_copy(update={"rotation_degrees": 0})
+    assert store.update(updated) is True
+    assert store.get("front").rotation_degrees == 0  # type: ignore[union-attr]
+
+
+def test_rotation_rejects_90_and_270() -> None:
+    # 90°/270° aren't supported — the Literal type should raise.
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        CameraConfig(id="front", role=CameraRole.FRONT, rotation_degrees=90)  # type: ignore[arg-type]
+    with pytest.raises(pydantic.ValidationError):
+        CameraConfig(id="front", role=CameraRole.FRONT, rotation_degrees=270)  # type: ignore[arg-type]
+    # Sanity: 0 and 180 are accepted.
+    assert CameraConfig(id="a", role=CameraRole.FRONT, rotation_degrees=0).rotation_degrees == 0
+    assert (
+        CameraConfig(id="b", role=CameraRole.FRONT, rotation_degrees=180).rotation_degrees == 180
+    )
+
+
+def test_rotation_migration_adds_column_to_old_db(tmp_path: Path) -> None:
+    """A DB created before the rotation_degrees column existed should
+    gain the column transparently on the next open, with existing
+    rows defaulting to 0."""
+    db = tmp_path / "dashcam.db"
+    # Hand-craft a pre-migration DB: the old schema, one row inserted
+    # via bare SQL (bypassing CameraStore so we don't trigger the
+    # migration path).
+    old_schema = """
+    CREATE TABLE cameras (
+        id TEXT PRIMARY KEY,
+        mxid TEXT NOT NULL,
+        role TEXT NOT NULL,
+        resolution TEXT NOT NULL,
+        fps INTEGER NOT NULL,
+        codec TEXT NOT NULL,
+        bitrate_kbps INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """
+    with sqlite3.connect(db) as conn:
+        conn.executescript(old_schema)
+        conn.execute(
+            """
+            INSERT INTO cameras
+                (id, mxid, role, resolution, fps, codec, bitrate_kbps,
+                 created_at, updated_at)
+            VALUES ('legacy', 'auto', 'front', '1080p', 30, 'h265', 8000,
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+
+    # Opening through CameraStore should ALTER TABLE ADD COLUMN on the fly.
+    store = CameraStore(db)
+    legacy = store.get("legacy")
+    assert legacy is not None
+    assert legacy.rotation_degrees == 0  # DEFAULT 0 applied to existing row
+
+    # Second open must be a no-op (safe to run repeatedly).
+    store2 = CameraStore(db)
+    assert store2.get("legacy") is not None

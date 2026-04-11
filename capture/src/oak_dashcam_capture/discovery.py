@@ -243,6 +243,33 @@ def create_discovery_app(service: DiscoveryService) -> FastAPI:
             media_type=f"multipart/x-mixed-replace; boundary={_MJPEG_BOUNDARY}",
         )
 
+    @app.post("/live/{camera_id}/reset")
+    async def reset_camera(camera_id: str) -> dict[str, str]:
+        """Stop a running camera's pipeline so its supervisor restarts it.
+
+        This is the "Reset" button target. We don't tear down the
+        supervisor; we just call `camera.stop()` on the DepthAICamera
+        instance. The supervisor's existing restart-on-crash loop
+        observes the pipeline ending, waits out `initial_restart_delay_s`,
+        and opens a fresh device. Recording for the other camera is
+        unaffected because each supervisor runs in its own asyncio
+        task.
+
+        Returns immediately (202) — we don't block waiting for the
+        camera to come back, since the supervisor backoff means
+        there's always a 5+ second gap and the UI can poll the live
+        preview endpoint to detect when frames resume.
+        """
+        camera = service.get_camera(camera_id)
+        if camera is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"camera {camera_id!r} is not currently running",
+            )
+        log.info("reset requested for camera %s", camera_id)
+        await camera.stop()
+        return {"status": "resetting", "camera_id": camera_id}
+
     return app
 
 

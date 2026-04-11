@@ -41,6 +41,13 @@ class CameraConfig(BaseModel):
     fps: int = Field(default=30, ge=1, le=60)
     codec: Codec = Codec.H265
     bitrate_kbps: int = Field(default=8000, ge=500, le=50000)
+    # Mount rotation applied to both recording and live preview, in
+    # degrees. Only 0 and 180 are supported — 180 handles the common
+    # "camera mounted upside-down on the ceiling" case. 90°/270° would
+    # require `ImageManip` rotation on the full-res video path, which
+    # costs VPU cycles and risks the two-camera X_LINK_ERROR issues we
+    # fixed earlier, so we deliberately don't offer them.
+    rotation_degrees: Literal[0, 180] = 0
 
     @field_validator("id")
     @classmethod

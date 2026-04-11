@@ -7,6 +7,8 @@ export type CameraRole = "front" | "rear" | "cabin" | "left" | "right";
 export type Resolution = "720p" | "1080p" | "4k";
 export type Codec = "h264" | "h265";
 
+export type RotationDegrees = 0 | 180;
+
 export interface Camera {
   id: string;
   mxid: string;
@@ -15,6 +17,7 @@ export interface Camera {
   fps: number;
   codec: Codec;
   bitrate_kbps: number;
+  rotation_degrees: RotationDegrees;
 }
 
 export interface CameraCreate {
@@ -25,6 +28,7 @@ export interface CameraCreate {
   fps: number;
   codec: Codec;
   bitrate_kbps: number;
+  rotation_degrees: RotationDegrees;
 }
 
 export interface Segment {
@@ -89,10 +93,11 @@ export const api = {
       method: "DELETE",
     }),
 
-  listSegments: (camera?: string, limit = 100) => {
+  listSegments: (opts: { camera?: string; limit?: number; before?: string } = {}) => {
     const params = new URLSearchParams();
-    if (camera) params.set("camera", camera);
-    params.set("limit", String(limit));
+    if (opts.camera) params.set("camera", opts.camera);
+    params.set("limit", String(opts.limit ?? 500));
+    if (opts.before) params.set("before", opts.before);
     return request<Segment[]>(`/api/segments?${params.toString()}`);
   },
 
@@ -110,4 +115,16 @@ export const api = {
 
   livePreviewUrl: (cameraId: string) =>
     `/api/live/${encodeURIComponent(cameraId)}/preview.mjpeg`,
+
+  resetCamera: (cameraId: string) =>
+    request<{ status: string; camera_id: string }>(
+      `/api/cameras/${encodeURIComponent(cameraId)}/reset`,
+      { method: "POST" },
+    ),
+
+  rotateCamera: (cameraId: string) =>
+    request<{ camera: Camera; restart_required: true }>(
+      `/api/cameras/${encodeURIComponent(cameraId)}/rotate`,
+      { method: "POST" },
+    ),
 };

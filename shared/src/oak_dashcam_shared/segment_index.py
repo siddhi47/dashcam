@@ -106,33 +106,65 @@ class SegmentIndex:
             assert new_id is not None
             return new_id
 
-    def list_by_camera(self, camera_id: str, *, limit: int = 100) -> list[SegmentRecord]:
-        """Most recent segments for one camera, newest first."""
+    def list_by_camera(
+        self,
+        camera_id: str,
+        *,
+        limit: int = 100,
+        before: datetime | None = None,
+    ) -> list[SegmentRecord]:
+        """Most recent segments for one camera, newest first.
+
+        `before` lets the caller page backwards through history: pass
+        the `started_at` of the oldest row from the previous page and
+        you get the next (older) page of segments strictly before that
+        timestamp. This pairs naturally with the `(camera_id, started_at DESC)`
+        index so each page is an O(limit) seek.
+        """
+        where = "WHERE camera_id = ?"
+        params: list[object] = [camera_id]
+        if before is not None:
+            where += " AND started_at < ?"
+            params.append(before.isoformat())
+        params.append(limit)
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT camera_id, path, started_at, duration_s, size_bytes,
                        codec, protected
                 FROM segments
-                WHERE camera_id = ?
+                {where}
                 ORDER BY started_at DESC
                 LIMIT ?
                 """,
-                (camera_id, limit),
+                params,
             ).fetchall()
         return [_row_to_record(row) for row in rows]
 
-    def list_all(self, *, limit: int = 1000) -> list[SegmentRecord]:
+    def list_all(
+        self,
+        *,
+        limit: int = 1000,
+        before: datetime | None = None,
+    ) -> list[SegmentRecord]:
+        """All segments newest-first, optionally paged via `before` timestamp."""
+        where = ""
+        params: list[object] = []
+        if before is not None:
+            where = "WHERE started_at < ?"
+            params.append(before.isoformat())
+        params.append(limit)
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT camera_id, path, started_at, duration_s, size_bytes,
                        codec, protected
                 FROM segments
+                {where}
                 ORDER BY started_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         return [_row_to_record(row) for row in rows]
 

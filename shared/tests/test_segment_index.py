@@ -84,6 +84,37 @@ def test_list_by_camera_limit(tmp_path: Path) -> None:
     assert len(idx.list_by_camera("front", limit=3)) == 3
 
 
+def test_list_by_camera_before_returns_older_page(tmp_path: Path) -> None:
+    idx = SegmentIndex(tmp_path / "dashcam.db")
+    base = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+    for i in range(5):
+        idx.insert(_record(path=f"front/{i}.mp4", started_at=base + timedelta(minutes=i)))
+
+    first_page = idx.list_by_camera("front", limit=2)
+    assert [r.path for r in first_page] == ["front/4.mp4", "front/3.mp4"]
+
+    # Use the oldest `started_at` from the first page as the pivot.
+    next_page = idx.list_by_camera("front", limit=2, before=first_page[-1].started_at)
+    assert [r.path for r in next_page] == ["front/2.mp4", "front/1.mp4"]
+
+    final_page = idx.list_by_camera("front", limit=10, before=next_page[-1].started_at)
+    assert [r.path for r in final_page] == ["front/0.mp4"]
+
+
+def test_list_all_before_pages_older_segments(tmp_path: Path) -> None:
+    idx = SegmentIndex(tmp_path / "dashcam.db")
+    base = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+    idx.insert(_record(path="front/a.mp4", started_at=base))
+    idx.insert(_record(path="front/b.mp4", started_at=base + timedelta(minutes=1)))
+    idx.insert(_record(path="rear/c.mp4", camera_id="rear", started_at=base + timedelta(minutes=2)))
+
+    first = idx.list_all(limit=2)
+    assert [r.path for r in first] == ["rear/c.mp4", "front/b.mp4"]
+
+    older = idx.list_all(limit=5, before=first[-1].started_at)
+    assert [r.path for r in older] == ["front/a.mp4"]
+
+
 def test_list_all_across_cameras(tmp_path: Path) -> None:
     idx = SegmentIndex(tmp_path / "dashcam.db")
     base = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
