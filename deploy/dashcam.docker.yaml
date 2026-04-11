@@ -1,0 +1,37 @@
+# Config used by the docker-compose stack in deploy/.
+#
+# Differs from ../config/dashcam.yaml only in `storage.root`, which is an
+# absolute container path pointing at the shared volume mount. The cameras
+# list here is the *first-run seed*: once the capture service has populated
+# the `cameras` table in `/data/dashcam/dashcam.db`, edits from the webapp
+# become authoritative and this section is ignored on subsequent starts.
+
+storage:
+  root: /data/dashcam
+  retention_gb: 200
+  segment_seconds: 60
+
+cameras:
+  - id: front
+    mxid: auto
+    role: front
+    resolution: 1080p
+    fps: 30
+    codec: h265
+    bitrate_kbps: 8000
+  - id: rear
+    mxid: auto
+    role: rear
+    resolution: 1080p
+    fps: 30
+    codec: h265
+    bitrate_kbps: 8000
+
+webapp:
+  bind: 0.0.0.0:8080
+  auth:
+    mode: none
+  live_preview: true
+
+logging:
+  level: info

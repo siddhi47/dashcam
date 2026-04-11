@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Node / frontend
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+webapp/frontend/.vite/
+
+# Local data, cache, OS noise
+/data/
+/.cache/
+.DS_Store
+*.log
+
+# VCS
+.git/
+.gitignore
+
+# Editor
+.vscode/
+.idea/

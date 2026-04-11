@@ -1,0 +1,52 @@
+# Production stack: capture + webapp on the Raspberry Pi with real OAK
+# hardware. Both services share a single named volume for segment files
+# and the SQLite DB, so the webapp sees everything capture writes without
+# any IPC beyond "the same file on disk".
+#
+# For Mac/Linux dev without OAK hardware, layer in the dev override:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up
+#
+# which drops USB passthrough and forces mock cameras.
+
+services:
+  capture:
+    build:
+      context: ..
+      dockerfile: capture/Dockerfile
+    image: oak-dashcam-capture:local
+    restart: unless-stopped
+    # `privileged: true` gives the container full device-cgroup access so
+    # it can talk to any USB device hot-plugged into the host. On macOS
+    # Docker Desktop this is a no-op and the dev-override drops it.
+    privileged: true
+    volumes:
+      - ../deploy/dashcam.docker.yaml:/config/dashcam.yaml:ro
+      - dashcam-data:/data/dashcam
+      # IMPORTANT: /dev/bus/usb is mounted as a **bind volume**, not via
+      # `devices:`. Docker's `--device` flag snapshots host device files
+      # at container-start and never updates — when an OAK camera resets
+      # itself during DepthAI's boot sequence (normal behavior), the
+      # host gets a new /dev/bus/usb/XXX node but the container's static
+      # snapshot still references the old one, and DepthAI fails with
+      # `X_LINK_DEVICE_NOT_FOUND`. A live bind mount reflects hot-plug
+      # events as they happen. Luxonis's own docker examples use this
+      # form for the same reason.
+      - /dev/bus/usb:/dev/bus/usb
+
+  webapp:
+    build:
+      context: ..
+      dockerfile: webapp/Dockerfile
+    image: oak-dashcam-webapp:local
+    restart: unless-stopped
+    depends_on:
+      - capture
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../deploy/dashcam.docker.yaml:/config/dashcam.yaml:ro
+      - dashcam-data:/data/dashcam
+
+volumes:
+  dashcam-data:

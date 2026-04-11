@@ -1,0 +1,31 @@
+# Development override: runs the full stack on Mac/Linux dev boxes without
+# any OAK hardware by forcing mock cameras and dropping USB passthrough.
+#
+# Usage:
+#
+#   docker compose \
+#     -f deploy/docker-compose.yml \
+#     -f deploy/docker-compose.dev.yml \
+#     up --build
+
+services:
+  capture:
+    # Docker Desktop on macOS doesn't expose /dev/bus/usb — drop the
+    # volume mount from the base file so this stack can run on a Mac.
+    # `!override` replaces the list entirely (default merge is append).
+    volumes: !override
+      - ../deploy/dashcam.docker.yaml:/config/dashcam.yaml:ro
+      - dashcam-data:/data/dashcam
+    privileged: false
+    environment:
+      # Force mock cameras + raw-bitstream sink. See `_should_use_mock` in
+      # capture/__main__.py.
+      - OAK_DASHCAM_MOCK=1
+
+  webapp:
+    # Remap to 8090 on the host — port 8080 is commonly already occupied
+    # on dev machines (Docker Desktop's own proxy, other services).
+    ports: !override
+      - "8090:8080"
+    environment:
+      - OAK_DASHCAM_ENV=dev

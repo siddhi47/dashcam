@@ -1,0 +1,29 @@
+storage:
+  root: data/dashcam
+  retention_gb: 200
+  segment_seconds: 60
+
+cameras:
+  - id: front
+    mxid: "18443010C145DB0E00"
+    role: front
+    resolution: 1080p
+    fps: 30
+    codec: h265
+    bitrate_kbps: 8000
+  - id: rear
+    mxid: "18443010D1BFDA0E00"
+    role: rear
+    resolution: 1080p
+    fps: 30
+    codec: h265
+    bitrate_kbps: 8000
+
+webapp:
+  bind: 0.0.0.0:8080
+  auth:
+    mode: none
+  live_preview: true
+
+logging:
+  level: info
