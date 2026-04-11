@@ -35,15 +35,31 @@ from oak_dashcam_capture.camera import EncodedFrame
 log = logging.getLogger(__name__)
 
 
-_RESOLUTION_PIXELS: dict[Resolution, tuple[int, int]] = {
-    Resolution.R_720P: (1280, 720),
-    Resolution.R_1080P: (1920, 1080),
-    Resolution.R_4K: (3840, 2160),
-}
+def _sensor_resolution(resolution: Resolution) -> Any:
+    """Map our `Resolution` enum to DepthAI's `ColorCameraProperties.SensorResolution`.
+
+    Kept as a function (not a dict constant) so it's evaluated lazily —
+    `dai.ColorCameraProperties.SensorResolution` is resolved at call
+    time, which makes the module import safe even when DepthAI's
+    internals shift between minor versions.
+    """
+    enum = dai.ColorCameraProperties.SensorResolution
+    match resolution:
+        case Resolution.R_720P:
+            return enum.THE_720_P
+        case Resolution.R_1080P:
+            return enum.THE_1080_P
+        case Resolution.R_4K:
+            return enum.THE_4_K
 
 # Live-preview stream parameters. These are deliberately small so the MJPEG
 # encoder runs cheap on the OAK and the resulting stream is reasonable to
 # send over a Wi-Fi AP to a phone or a browser on the LAN.
+# Live preview target resolution. Much smaller than the storage resolution
+# so the MJPEG encoder doesn't flood the USB bus with multi-hundred-KB
+# frames on top of the H265 stream.
+_PREVIEW_WIDTH = 640
+_PREVIEW_HEIGHT = 360
 # Frames per second delivered to live-preview subscribers. The MJPEG
 # encoder runs at the camera's sensor fps (usually 30) because we share
 # its input with the storage encoder, but the worker thread publishes
@@ -275,20 +291,29 @@ class DepthAICamera:
                     log.exception("on_device_resolved callback for %s failed", self._cfg.id)
             pipeline = dai.Pipeline(defaultDevice=device)
 
-            width, height = _RESOLUTION_PIXELS[self._cfg.resolution]
-            camera_node = pipeline.create(dai.node.Camera).build(
-                boardSocket=dai.CameraBoardSocket.CAM_A,
-            )
-            # VideoEncoder only accepts NV12 or YUV400p on its input. Ask the
-            # Camera node for NV12 explicitly — without this, DepthAI logs
-            # "Arrived frame type (2) is not either NV12 or YUV400p" and drops
-            # every frame.
-            camera_output = camera_node.requestOutput(
-                size=(width, height),
-                type=dai.ImgFrame.Type.NV12,
-                fps=float(self._cfg.fps),
-            )
+            # We use `dai.node.ColorCamera` (the v2-style unified camera
+            # node) rather than the newer `dai.node.Camera` +
+            # `requestOutput` API. Two reasons:
+            #
+            # 1. ColorCamera natively exposes `.video` (full-res NV12)
+            #    AND `.preview` (downscaled, configurable) outputs in
+            #    one node. No second `requestOutput` call — which on
+            #    Pi 4 + DepthAI v3.5 silently breaks the pipeline. No
+            #    ImageManip — which on the same combo seems to load
+            #    the Myriad X enough to cause X_LINK_ERROR disconnects
+            #    when two cameras are running at once.
+            # 2. ColorCamera's `.preview` runs on dedicated ISP
+            #    hardware that downscales the sensor output straight
+            #    to the target preview size, so encoding MJPEG from it
+            #    is much cheaper than re-encoding a full-res frame.
+            color_cam = pipeline.create(dai.node.ColorCamera)
+            color_cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+            color_cam.setResolution(_sensor_resolution(self._cfg.resolution))
+            color_cam.setFps(float(self._cfg.fps))
+            color_cam.setPreviewSize(_PREVIEW_WIDTH, _PREVIEW_HEIGHT)
+            color_cam.setInterleaved(False)
 
+            # Storage encoder: full-res H.265 off the `.video` output.
             encoder = pipeline.create(dai.node.VideoEncoder)
             encoder.setDefaultProfilePreset(
                 float(self._cfg.fps),
@@ -296,30 +321,33 @@ class DepthAICamera:
             )
             encoder.setBitrateKbps(self._cfg.bitrate_kbps)
             encoder.setKeyframeFrequency(self._cfg.fps)  # 1-second GOP
-
-            camera_output.link(encoder.input)
+            color_cam.video.link(encoder.input)
             queue = encoder.out.createOutputQueue(maxSize=30, blocking=False)
 
-            # Second branch: fan the SAME camera_output out to a second
-            # VideoEncoder configured for MJPEG. DepthAI's Node.Output
-            # supports linking to multiple consumer inputs natively, so
-            # the sensor captures once and both encoders get the same
-            # frames.
-            #
-            # We deliberately don't call `requestOutput` twice on the
-            # Camera node — empirically a second `requestOutput` call
-            # silently stops frame production on both branches on the
-            # Pi 4 / DepthAI v3.5 combo we're on. The trade-off is
-            # that MJPEG encodes at the full sensor fps instead of a
-            # cheaper low-fps output, and the downsampling happens at
-            # the Python worker level (see `_mjpeg_worker`).
+            # Preview path: ColorCamera's `.preview` output is BGR,
+            # but VideoEncoder's MJPEG profile only accepts NV12 /
+            # YUV400p. An `ImageManip` node does the color-space
+            # conversion — and *only* the color-space conversion,
+            # since `.preview` is already downscaled on the ISP to
+            # our target size. That makes this ImageManip much
+            # cheaper than the full-res resize variant we tried
+            # earlier (which caused X_LINK_ERROR disconnects under
+            # two-camera load).
+            preview_manip = pipeline.create(dai.node.ImageManip)
+            preview_manip.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
+            color_cam.preview.link(preview_manip.inputImage)
+
+            # Preview encoder: MJPEG at a low target fps to keep
+            # encoder + USB work modest.
             preview_encoder = pipeline.create(dai.node.VideoEncoder)
             preview_encoder.setDefaultProfilePreset(
-                float(self._cfg.fps),
+                _PREVIEW_TARGET_FPS,
                 dai.VideoEncoderProperties.Profile.MJPEG,
             )
-            camera_output.link(preview_encoder.input)
-            preview_queue = preview_encoder.out.createOutputQueue(maxSize=4, blocking=False)
+            preview_manip.out.link(preview_encoder.input)
+            preview_queue = preview_encoder.out.createOutputQueue(
+                maxSize=4, blocking=False
+            )
 
             pipeline.start()
         except BaseException as exc:

@@ -27,7 +27,7 @@ import depthai as dai
 from oak_dashcam_shared import load_config
 from oak_dashcam_shared.config import CameraConfig
 
-from oak_dashcam_capture.depthai_camera import _RESOLUTION_PIXELS
+from oak_dashcam_capture.depthai_camera import _sensor_resolution
 
 log = logging.getLogger("oak_dashcam_snapshot")
 
@@ -51,22 +51,18 @@ def _capture_snapshot(cam_cfg: CameraConfig, output: Path) -> None:
     device = dai.Device(devices[cam_cfg.mxid])
     pipeline = dai.Pipeline(defaultDevice=device)
 
-    width, height = _RESOLUTION_PIXELS[cam_cfg.resolution]
-    camera_node = pipeline.create(dai.node.Camera).build(
-        boardSocket=dai.CameraBoardSocket.CAM_A,
-    )
-    cam_out = camera_node.requestOutput(
-        size=(width, height),
-        type=dai.ImgFrame.Type.NV12,
-        fps=float(cam_cfg.fps),
-    )
+    color_cam = pipeline.create(dai.node.ColorCamera)
+    color_cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+    color_cam.setResolution(_sensor_resolution(cam_cfg.resolution))
+    color_cam.setFps(float(cam_cfg.fps))
+    color_cam.setInterleaved(False)
 
     encoder = pipeline.create(dai.node.VideoEncoder)
     encoder.setDefaultProfilePreset(
         float(cam_cfg.fps),
         dai.VideoEncoderProperties.Profile.MJPEG,
     )
-    cam_out.link(encoder.input)
+    color_cam.video.link(encoder.input)
 
     queue = encoder.out.createOutputQueue(maxSize=1, blocking=False)
 
