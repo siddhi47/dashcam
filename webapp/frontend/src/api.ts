@@ -127,4 +127,7 @@ export const api = {
       `/api/cameras/${encodeURIComponent(cameraId)}/rotate`,
       { method: "POST" },
     ),
+
+  shutdownHost: () =>
+    request<{ status: string }>("/api/system/shutdown", { method: "POST" }),
 };

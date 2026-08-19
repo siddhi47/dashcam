@@ -1,14 +1,34 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LivePage } from "./pages/Live.tsx";
 import { SegmentsPage } from "./pages/Segments.tsx";
 import { CamerasPage } from "./pages/Cameras.tsx";
+import { DisplayPage } from "./pages/Display.tsx";
 
 type Tab = "live" | "segments" | "cameras";
 
 export default function App() {
-  // Live preview is the landing page — most of the time you open this
-  // app to glance at what the cameras are seeing right now, not to
-  // dig through old recordings.
+  // Default to display mode (fullscreen camera feeds). Navigate to
+  // `#admin` to get the full management UI (Live, Segments, Cameras).
+  // This makes the dashcam screen show feeds on boot with zero
+  // interaction required.
+  const [adminMode, setAdminMode] = useState(
+    window.location.hash === "#admin",
+  );
+
+  useEffect(() => {
+    const onHash = () => setAdminMode(window.location.hash === "#admin");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  if (adminMode) {
+    return <MainApp />;
+  }
+
+  return <DisplayPage />;
+}
+
+function MainApp() {
   const [tab, setTab] = useState<Tab>("live");
 
   return (

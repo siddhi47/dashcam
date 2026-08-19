@@ -22,7 +22,13 @@ services:
     privileged: true
     volumes:
       - ../deploy/dashcam.docker.yaml:/config/dashcam.yaml:ro
-      - dashcam-data:/data/dashcam
+      # Recordings + SQLite DB live on the microSD root filesystem at
+      # /var/lib/oak-dashcam. Originally this was a bind mount to an
+      # external SSD, but the SSD proved unreliable — random write
+      # timeouts that remounted ext4 read-only and crashed both
+      # services. Until a replacement SSD is in, everything lives on
+      # the SD; retention_gb in dashcam.yaml keeps usage bounded.
+      - /var/lib/oak-dashcam:/data/dashcam
       # IMPORTANT: /dev/bus/usb is mounted as a **bind volume**, not via
       # `devices:`. Docker's `--device` flag snapshots host device files
       # at container-start and never updates — when an OAK camera resets
@@ -46,7 +52,10 @@ services:
       - "8080:8080"
     volumes:
       - ../deploy/dashcam.docker.yaml:/config/dashcam.yaml:ro
-      - dashcam-data:/data/dashcam
-
-volumes:
-  dashcam-data:
+      - /var/lib/oak-dashcam:/data/dashcam
+      # Docker socket: lets the webapp trigger host-level operations
+      # like `shutdown -h now` via the Docker SDK. The webapp spawns
+      # a one-shot privileged container that calls nsenter into PID 1.
+      # This is equivalent to root on the host — acceptable for a
+      # single-user LAN-only dashcam, not for a public-facing service.
+      - /var/run/docker.sock:/var/run/docker.sock

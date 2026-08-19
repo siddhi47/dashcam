@@ -56,6 +56,7 @@ def _build_camera(
     *,
     use_mock: bool,
     camera_store: CameraStore | None = None,
+    boot_lock: asyncio.Lock | None = None,
 ) -> Camera:
     if use_mock:
         return MockCamera(
@@ -93,7 +94,7 @@ def _build_camera(
 
         callback = _on_resolved
 
-    return DepthAICamera(cam_cfg, on_device_resolved=callback)
+    return DepthAICamera(cam_cfg, on_device_resolved=callback, boot_lock=boot_lock)
 
 
 def resolve_auto_mxids(cameras: list[CameraConfig]) -> list[CameraConfig]:
@@ -166,6 +167,7 @@ def build_supervisors(
     cameras_override: list[CameraConfig] | None = None,
     camera_store: CameraStore | None = None,
     camera_registry: dict[str, Camera] | None = None,
+    boot_lock: asyncio.Lock | None = None,
 ) -> list[CameraSupervisor]:
     """Construct one supervisor per configured camera.
 
@@ -175,6 +177,11 @@ def build_supervisors(
     supervisors that are already recording. Only real (non-mock)
     `DepthAICamera` instances are registered — mock cameras don't
     expose a preview stream.
+
+    `boot_lock` is shared across all cameras so only one device boots
+    at a time. This prevents the USB-contention race that causes
+    "Failed to boot device!" when two OAKs try to initialize
+    simultaneously on the Pi 4's shared USB controller.
     """
     use_mock = _should_use_mock()
     # Prefer `cameras_override` (DB-backed) when the caller provides it; the
@@ -184,7 +191,9 @@ def build_supervisors(
     cameras = source_cameras if use_mock else resolve_auto_mxids(source_cameras)
     supervisors: list[CameraSupervisor] = []
     for cam_cfg in cameras:
-        camera = _build_camera(cam_cfg, use_mock=use_mock, camera_store=camera_store)
+        camera = _build_camera(
+            cam_cfg, use_mock=use_mock, camera_store=camera_store, boot_lock=boot_lock
+        )
         if camera_registry is not None and isinstance(camera, DepthAICamera):
             camera_registry[cam_cfg.id] = camera
         writer = SegmentWriter(
@@ -266,12 +275,19 @@ async def _main_async(config: DashcamConfig) -> None:
     # reads it to tap each camera's live MJPEG preview stream without
     # opening a second device.
     camera_registry: dict[str, Camera] = {}
+    # Boot lock: serializes `dai.Device()` calls so only one camera
+    # boots at a time. Without this, two OAKs trying to boot
+    # concurrently on the Pi 4's shared USB controller race and one
+    # (or both) fail with "Failed to boot device!" — especially bad
+    # when mixing OAK-D (3-sensor, heavy boot) with OAK-1.
+    boot_lock = asyncio.Lock()
     supervisors = build_supervisors(
         config,
         index=index,
         cameras_override=cameras,
         camera_store=camera_store,
         camera_registry=camera_registry,
+        boot_lock=boot_lock,
     )
     retention = RetentionManager(
         root=config.storage.root,

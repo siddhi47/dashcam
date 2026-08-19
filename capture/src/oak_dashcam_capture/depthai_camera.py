@@ -152,9 +152,16 @@ class DepthAICamera:
         cam_cfg: CameraConfig,
         *,
         on_device_resolved: Callable[[str, str], None] | None = None,
+        boot_lock: asyncio.Lock | None = None,
     ) -> None:
         self._cfg = cam_cfg
         self._on_device_resolved = on_device_resolved
+        # Shared across all DepthAICamera instances. Held during
+        # `start()` so only one camera boots at a time. Without this,
+        # two cameras calling `dai.Device()` concurrently race for USB
+        # resources and one (or both) fail with X_LINK errors — especially
+        # when mixing OAK-D (3 sensors, heavy boot) with OAK-1.
+        self._boot_lock = boot_lock
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[EncodedFrame | None] | None = None
         self._thread: threading.Thread | None = None
@@ -175,24 +182,39 @@ class DepthAICamera:
     async def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("DepthAICamera already started")
-        self._loop = asyncio.get_running_loop()
-        self._queue = asyncio.Queue()
-        self._stop_flag.clear()
-        self._ready.clear()
-        self._start_error = None
 
-        self._thread = threading.Thread(
-            target=self._worker,
-            name=f"depthai-{self._cfg.id}",
-            daemon=True,
-        )
-        self._thread.start()
+        # If a boot lock is set, serialize: only one camera boots at
+        # a time. This prevents two `dai.Device()` calls from racing
+        # on the USB bus — the loser would fail with "Failed to boot
+        # device!" or X_LINK_DEVICE_NOT_FOUND. The lock is held from
+        # before the worker thread spawns until the device is fully
+        # open and streaming (or has failed), so the next camera's
+        # boot attempt starts with a clean, uncontested USB bus.
+        if self._boot_lock is not None:
+            await self._boot_lock.acquire()
 
-        # Wait for the worker to either fully open the device or fail.
-        await asyncio.to_thread(self._ready.wait)
-        if self._start_error is not None:
-            self._thread = None
-            raise self._start_error
+        try:
+            self._loop = asyncio.get_running_loop()
+            self._queue = asyncio.Queue()
+            self._stop_flag.clear()
+            self._ready.clear()
+            self._start_error = None
+
+            self._thread = threading.Thread(
+                target=self._worker,
+                name=f"depthai-{self._cfg.id}",
+                daemon=True,
+            )
+            self._thread.start()
+
+            # Wait for the worker to either fully open the device or fail.
+            await asyncio.to_thread(self._ready.wait)
+            if self._start_error is not None:
+                self._thread = None
+                raise self._start_error
+        finally:
+            if self._boot_lock is not None and self._boot_lock.locked():
+                self._boot_lock.release()
 
     async def stop(self) -> None:
         self._stop_flag.set()

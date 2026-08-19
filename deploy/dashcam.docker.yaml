@@ -8,20 +8,15 @@
 
 storage:
   root: /data/dashcam
-  retention_gb: 200
+  # SSD is offline — all data lives on the Pi's microSD root fs (~18 GB free).
+  # Aggressive cap keeps the SD from filling up.
+  retention_gb: 10
   segment_seconds: 60
 
 cameras:
   - id: front
     mxid: auto
     role: front
-    resolution: 1080p
-    fps: 30
-    codec: h265
-    bitrate_kbps: 8000
-  - id: rear
-    mxid: auto
-    role: rear
     resolution: 1080p
     fps: 30
     codec: h265

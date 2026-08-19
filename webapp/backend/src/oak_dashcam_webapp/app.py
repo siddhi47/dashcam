@@ -407,6 +407,40 @@ def create_app(
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 
+    # ---------------------------------------------------------- system
+
+    @app.post("/api/system/shutdown")
+    async def shutdown_host() -> dict[str, str]:
+        """Gracefully shut down the Pi host.
+
+        Spawns a one-shot privileged container that calls `shutdown`
+        on the host via PID namespace sharing. The 3-second sleep
+        gives time for the HTTP 200 response to reach the browser
+        before the host goes down.
+
+        Requires `/var/run/docker.sock` to be mounted into this
+        container (see docker-compose.yml).
+        """
+        try:
+            import docker as docker_sdk
+
+            client = docker_sdk.from_env()
+            client.containers.run(
+                "alpine",
+                'sh -c "sleep 3 && nsenter -t 1 -m -u -i -n -- shutdown -h now"',
+                pid_mode="host",
+                privileged=True,
+                remove=True,
+                detach=True,
+            )
+        except Exception as exc:
+            log.exception("shutdown failed")
+            raise HTTPException(
+                status_code=503,
+                detail=f"shutdown failed: {exc}",
+            ) from exc
+        return {"status": "shutting_down"}
+
     # Frontend static files must be mounted **last** — FastAPI matches
     # mounts before later route declarations, so a `/` mount would shadow
     # any API route registered after it. `html=True` makes StaticFiles
