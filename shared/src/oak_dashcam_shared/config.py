@@ -57,6 +57,39 @@ class CameraConfig(BaseModel):
         return v
 
 
+class S3ModelSource(BaseModel):
+    """Where to fetch detection models from.
+
+    Credentials are deliberately NOT config fields — boto3 reads them
+    from the standard AWS environment variables / credential files, so
+    secrets never end up in the version-controlled YAML.
+    """
+
+    bucket: str
+    prefix: str = ""
+    region: str | None = None
+    # For S3-compatible stores (MinIO on the LAN, etc.).
+    endpoint_url: str | None = None
+
+
+class DetectionConfig(BaseModel):
+    """On-device YOLO object detection.
+
+    The model is a DepthAI NNArchive (`.tar.xz` containing the compiled
+    blob + decoding config) and runs on the OAK's VPU — never on the Pi
+    CPU. With `enabled: true` but no model available (nothing cached in
+    `model_dir` and no `s3` source configured/reachable), capture logs a
+    warning and records without detection.
+    """
+
+    enabled: bool = True
+    # Where downloaded/cached models live. Defaults to
+    # `{storage.root}/models` when unset.
+    model_dir: Path | None = None
+    confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    s3: S3ModelSource | None = None
+
+
 class AuthConfig(BaseModel):
     mode: Literal["none", "basic", "token"] = "none"
     username: str | None = None
@@ -77,6 +110,7 @@ class LoggingConfig(BaseModel):
 class DashcamConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     cameras: list[CameraConfig]
+    detection: DetectionConfig = Field(default_factory=DetectionConfig)
     webapp: WebappConfig = Field(default_factory=WebappConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

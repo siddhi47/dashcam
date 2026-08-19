@@ -24,7 +24,9 @@ import asyncio
 import contextlib
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import depthai as dai
@@ -51,6 +53,7 @@ def _sensor_resolution(resolution: Resolution) -> Any:
             return enum.THE_1080_P
         case Resolution.R_4K:
             return enum.THE_4_K
+
 
 # Live-preview stream parameters. These are deliberately small so the
 # MJPEG encoder runs cheap on the OAK and the resulting stream is
@@ -153,9 +156,27 @@ class DepthAICamera:
         *,
         on_device_resolved: Callable[[str, str], None] | None = None,
         boot_lock: asyncio.Lock | None = None,
+        nn_archive_path: Path | None = None,
+        nn_confidence_threshold: float = 0.5,
     ) -> None:
         self._cfg = cam_cfg
         self._on_device_resolved = on_device_resolved
+        # Optional on-device YOLO detection. When `nn_archive_path`
+        # points at a DepthAI NNArchive, the pipeline grows a
+        # DetectionNetwork branch fed from the preview output and
+        # `latest_detections()` starts returning results. Failure to
+        # build the branch (bad archive, VPU out of resources) must
+        # never stop recording — see `_build_pipeline`.
+        self._nn_archive_path = nn_archive_path
+        self._nn_confidence = nn_confidence_threshold
+        self._nn_labels: list[str] = []
+        self._detection_active = False
+        # Latest-detections snapshot, written by the detection worker
+        # thread and read by the discovery sidecar. Plain reference
+        # assignment of an immutable-once-written dict — atomic under
+        # the GIL, no lock needed.
+        self._latest_detections: dict[str, Any] | None = None
+        self._detection_thread: threading.Thread | None = None
         # Shared across all DepthAICamera instances. Held during
         # `start()` so only one camera boots at a time. Without this,
         # two cameras calling `dai.Device()` concurrently race for USB
@@ -226,6 +247,10 @@ class DepthAICamera:
         if preview_thread is not None:
             await asyncio.to_thread(preview_thread.join, 2.0)
             self._preview_thread = None
+        detection_thread = self._detection_thread
+        if detection_thread is not None:
+            await asyncio.to_thread(detection_thread.join, 2.0)
+            self._detection_thread = None
         if self._queue is not None and self._loop is not None:
             # Signal end-of-stream to anyone still draining `frames()`.
             self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
@@ -271,11 +296,29 @@ class DepthAICamera:
         finally:
             self._preview_subscribers.discard(queue)
 
+    def latest_detections(self) -> dict[str, Any]:
+        """Most recent YOLO detections from the on-device network.
+
+        Returns `{"enabled": bool, "ts": float | None, "detections": [...]}`
+        where each detection is `{"label", "label_name", "confidence",
+        "bbox": [xmin, ymin, xmax, ymax]}` with bbox coordinates
+        normalized to 0..1 over the full (16:9) preview frame.
+        `enabled` is False when no model is loaded — the frontend uses
+        it to stop polling. Safe to call from any thread.
+        """
+        snapshot = self._latest_detections
+        return {
+            "enabled": self._detection_active,
+            "ts": snapshot["ts"] if snapshot is not None else None,
+            "detections": snapshot["detections"] if snapshot is not None else [],
+        }
+
     def _worker(self) -> None:
         device: dai.Device | None = None
         pipeline: dai.Pipeline | None = None
         queue: dai.MessageQueue | None = None
         preview_queue: dai.MessageQueue | None = None
+        detection_queue: dai.MessageQueue | None = None
         try:
             # We deliberately force USB 2.0 HIGH speed. On a Pi 4 with OAK
             # devices, USB 3.0 SuperSpeed negotiation is flaky — the link
@@ -311,83 +354,7 @@ class DepthAICamera:
                     self._on_device_resolved(self._cfg.id, resolved_mxid)
                 except Exception:
                     log.exception("on_device_resolved callback for %s failed", self._cfg.id)
-            pipeline = dai.Pipeline(defaultDevice=device)
-
-            # We use `dai.node.ColorCamera` (the v2-style unified camera
-            # node) rather than the newer `dai.node.Camera` +
-            # `requestOutput` API. Two reasons:
-            #
-            # 1. ColorCamera natively exposes `.video` (full-res NV12)
-            #    AND `.preview` (downscaled, configurable) outputs in
-            #    one node. No second `requestOutput` call — which on
-            #    Pi 4 + DepthAI v3.5 silently breaks the pipeline. No
-            #    ImageManip — which on the same combo seems to load
-            #    the Myriad X enough to cause X_LINK_ERROR disconnects
-            #    when two cameras are running at once.
-            # 2. ColorCamera's `.preview` runs on dedicated ISP
-            #    hardware that downscales the sensor output straight
-            #    to the target preview size, so encoding MJPEG from it
-            #    is much cheaper than re-encoding a full-res frame.
-            color_cam = pipeline.create(dai.node.ColorCamera)
-            color_cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-            color_cam.setResolution(_sensor_resolution(self._cfg.resolution))
-            color_cam.setFps(float(self._cfg.fps))
-            color_cam.setPreviewSize(_PREVIEW_WIDTH, _PREVIEW_HEIGHT)
-            color_cam.setInterleaved(False)
-
-            # 180° rotation for ceiling-mounted cameras. Handled at the
-            # ColorCamera ISP level so both the recording and preview
-            # branches see an already-flipped frame — no extra
-            # ImageManip, no extra VPU cost. Only 0° and 180° are
-            # supported; see the comment on `CameraConfig.rotation_degrees`.
-            if self._cfg.rotation_degrees == 180:
-                color_cam.setImageOrientation(
-                    dai.CameraImageOrientation.ROTATE_180_DEG
-                )
-            log.info(
-                "camera %s: rotation configured to %d deg",
-                self._cfg.id,
-                self._cfg.rotation_degrees,
-            )
-
-            # Storage encoder: full-res H.265 off the `.video` output.
-            encoder = pipeline.create(dai.node.VideoEncoder)
-            encoder.setDefaultProfilePreset(
-                float(self._cfg.fps),
-                _codec_profile(self._cfg.codec),
-            )
-            encoder.setBitrateKbps(self._cfg.bitrate_kbps)
-            encoder.setKeyframeFrequency(self._cfg.fps)  # 1-second GOP
-            color_cam.video.link(encoder.input)
-            queue = encoder.out.createOutputQueue(maxSize=30, blocking=False)
-
-            # Preview path: ColorCamera's `.preview` output is BGR,
-            # but VideoEncoder's MJPEG profile only accepts NV12 /
-            # YUV400p. An `ImageManip` node does the color-space
-            # conversion — and *only* the color-space conversion,
-            # since `.preview` is already downscaled on the ISP to
-            # our target size. That makes this ImageManip much
-            # cheaper than the full-res resize variant we tried
-            # earlier (which caused X_LINK_ERROR disconnects under
-            # two-camera load).
-            preview_manip = pipeline.create(dai.node.ImageManip)
-            preview_manip.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
-            color_cam.preview.link(preview_manip.inputImage)
-
-            # Preview encoder: MJPEG at the full sensor fps. The preview
-            # frames are tiny (_PREVIEW_WIDTH x _PREVIEW_HEIGHT, already
-            # downscaled on the ISP) so the aggregate encoder + USB work
-            # is well inside the Pi 4's USB 2.0 headroom even with two
-            # cameras running.
-            preview_encoder = pipeline.create(dai.node.VideoEncoder)
-            preview_encoder.setDefaultProfilePreset(
-                float(self._cfg.fps),
-                dai.VideoEncoderProperties.Profile.MJPEG,
-            )
-            preview_manip.out.link(preview_encoder.input)
-            preview_queue = preview_encoder.out.createOutputQueue(
-                maxSize=4, blocking=False
-            )
+            pipeline, queue, preview_queue, detection_queue = self._build_pipeline(device)
 
             pipeline.start()
         except BaseException as exc:
@@ -410,6 +377,18 @@ class DepthAICamera:
         )
         self._preview_thread.start()
 
+        # Detection worker: drains the DetectionNetwork output queue and
+        # keeps `self._latest_detections` fresh. Only exists when the
+        # detection branch was successfully built.
+        if detection_queue is not None:
+            self._detection_thread = threading.Thread(
+                target=self._detection_worker,
+                args=(detection_queue,),
+                name=f"depthai-{self._cfg.id}-detect",
+                daemon=True,
+            )
+            self._detection_thread.start()
+
         start_ts_us: int | None = None
         try:
             while not self._stop_flag.is_set():
@@ -426,6 +405,223 @@ class DepthAICamera:
             self._cleanup(pipeline, device)
             if self._loop is not None and self._queue is not None:
                 self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
+
+    def _build_pipeline(
+        self, device: dai.Device
+    ) -> tuple[dai.Pipeline, dai.MessageQueue, dai.MessageQueue, dai.MessageQueue | None]:
+        """Build the device pipeline, degrading to no-detection on failure.
+
+        The detection branch depends on external state (the NNArchive
+        file on disk, VPU resource headroom) that can be broken without
+        anything else being wrong. A bad model must never stop the
+        camera from recording, so if the detection build raises we log
+        a warning and rebuild a fresh pipeline without it. Pipelines
+        are host-side object graphs until `start()`, so throwing one
+        away and building another against the same device is cheap.
+        """
+        if self._nn_archive_path is not None:
+            try:
+                result = self._build_pipeline_once(device, with_detection=True)
+                self._detection_active = True
+                return result
+            except Exception:
+                log.warning(
+                    "camera %s: failed to build detection branch from %s; "
+                    "recording without object detection",
+                    self._cfg.id,
+                    self._nn_archive_path,
+                    exc_info=True,
+                )
+                self._detection_active = False
+        return self._build_pipeline_once(device, with_detection=False)
+
+    def _build_pipeline_once(
+        self, device: dai.Device, *, with_detection: bool
+    ) -> tuple[dai.Pipeline, dai.MessageQueue, dai.MessageQueue, dai.MessageQueue | None]:
+        """Construct one pipeline: recording + preview (+ optional detection)."""
+        pipeline = dai.Pipeline(defaultDevice=device)
+
+        # We use `dai.node.ColorCamera` (the v2-style unified camera
+        # node) rather than the newer `dai.node.Camera` +
+        # `requestOutput` API. Two reasons:
+        #
+        # 1. ColorCamera natively exposes `.video` (full-res NV12)
+        #    AND `.preview` (downscaled, configurable) outputs in
+        #    one node. No second `requestOutput` call — which on
+        #    Pi 4 + DepthAI v3.5 silently breaks the pipeline. No
+        #    ImageManip — which on the same combo seems to load
+        #    the Myriad X enough to cause X_LINK_ERROR disconnects
+        #    when two cameras are running at once.
+        # 2. ColorCamera's `.preview` runs on dedicated ISP
+        #    hardware that downscales the sensor output straight
+        #    to the target preview size, so encoding MJPEG from it
+        #    is much cheaper than re-encoding a full-res frame.
+        color_cam = pipeline.create(dai.node.ColorCamera)
+        color_cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        color_cam.setResolution(_sensor_resolution(self._cfg.resolution))
+        color_cam.setFps(float(self._cfg.fps))
+        color_cam.setPreviewSize(_PREVIEW_WIDTH, _PREVIEW_HEIGHT)
+        color_cam.setInterleaved(False)
+
+        # 180° rotation for ceiling-mounted cameras. Handled at the
+        # ColorCamera ISP level so both the recording and preview
+        # branches see an already-flipped frame — no extra
+        # ImageManip, no extra VPU cost. Only 0° and 180° are
+        # supported; see the comment on `CameraConfig.rotation_degrees`.
+        if self._cfg.rotation_degrees == 180:
+            color_cam.setImageOrientation(dai.CameraImageOrientation.ROTATE_180_DEG)
+        log.info(
+            "camera %s: rotation configured to %d deg",
+            self._cfg.id,
+            self._cfg.rotation_degrees,
+        )
+
+        # Storage encoder: full-res H.265 off the `.video` output.
+        encoder = pipeline.create(dai.node.VideoEncoder)
+        encoder.setDefaultProfilePreset(
+            float(self._cfg.fps),
+            _codec_profile(self._cfg.codec),
+        )
+        encoder.setBitrateKbps(self._cfg.bitrate_kbps)
+        encoder.setKeyframeFrequency(self._cfg.fps)  # 1-second GOP
+        color_cam.video.link(encoder.input)
+        queue = encoder.out.createOutputQueue(maxSize=30, blocking=False)
+
+        # Preview path: ColorCamera's `.preview` output is BGR,
+        # but VideoEncoder's MJPEG profile only accepts NV12 /
+        # YUV400p. An `ImageManip` node does the color-space
+        # conversion — and *only* the color-space conversion,
+        # since `.preview` is already downscaled on the ISP to
+        # our target size. That makes this ImageManip much
+        # cheaper than the full-res resize variant we tried
+        # earlier (which caused X_LINK_ERROR disconnects under
+        # two-camera load).
+        preview_manip = pipeline.create(dai.node.ImageManip)
+        preview_manip.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
+        color_cam.preview.link(preview_manip.inputImage)
+
+        # Preview encoder: MJPEG at the full sensor fps. The preview
+        # frames are tiny (_PREVIEW_WIDTH x _PREVIEW_HEIGHT, already
+        # downscaled on the ISP) so the aggregate encoder + USB work
+        # is well inside the Pi 4's USB 2.0 headroom even with two
+        # cameras running.
+        preview_encoder = pipeline.create(dai.node.VideoEncoder)
+        preview_encoder.setDefaultProfilePreset(
+            float(self._cfg.fps),
+            dai.VideoEncoderProperties.Profile.MJPEG,
+        )
+        preview_manip.out.link(preview_encoder.input)
+        preview_queue = preview_encoder.out.createOutputQueue(maxSize=4, blocking=False)
+
+        detection_queue: dai.MessageQueue | None = None
+        if with_detection:
+            detection_queue = self._add_detection_branch(pipeline, color_cam)
+
+        return pipeline, queue, preview_queue, detection_queue
+
+    def _add_detection_branch(self, pipeline: dai.Pipeline, color_cam: Any) -> dai.MessageQueue:
+        """Attach an on-device YOLO DetectionNetwork fed from `.preview`.
+
+        The NN eats the already-ISP-downscaled preview frames (BGR
+        planar, 480x270), resized to the network's input square by a
+        small ImageManip. Two deliberate choices:
+
+        * The resize source is the tiny preview output, NOT the
+          full-res `.video` — a full-res ImageManip resize is exactly
+          what caused the X_LINK_ERROR disconnect loop under
+          two-camera load before. Resizing 480x270 is a fraction of
+          that work. Detection quality at 480x270-sourced input is
+          fine for "is there a car/person" dashcam purposes.
+        * STRETCH (not LETTERBOX) resize: stretching preserves
+          relative coordinates, so the normalized bboxes the network
+          emits map 1:1 onto the 16:9 preview/recording frame with no
+          unpadding math anywhere downstream.
+        """
+        assert self._nn_archive_path is not None
+        archive = dai.NNArchive(self._nn_archive_path)
+        nn_w = archive.getInputWidth()
+        nn_h = archive.getInputHeight()
+        if nn_w is None or nn_h is None:
+            # Raising here lands in `_build_pipeline`'s catch, which
+            # rebuilds without detection — a malformed archive must not
+            # stop recording.
+            raise ValueError(
+                f"NNArchive {self._nn_archive_path} does not declare an input size"
+            )
+
+        nn_manip = pipeline.create(dai.node.ImageManip)
+        nn_manip.initialConfig.setOutputSize(nn_w, nn_h, dai.ImageManipConfig.ResizeMode.STRETCH)
+        nn_manip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
+        color_cam.preview.link(nn_manip.inputImage)
+
+        nn = pipeline.create(dai.node.DetectionNetwork)
+        nn.setNNArchive(archive)
+        nn.setConfidenceThreshold(self._nn_confidence)
+        nn_manip.out.link(nn.input)
+
+        # Class-name lookup for `label_name` in the detections JSON.
+        # Not all archives carry class names; missing ones fall back
+        # to the numeric label at snapshot time.
+        try:
+            self._nn_labels = list(nn.getClasses() or [])
+        except Exception:
+            self._nn_labels = []
+
+        detection_queue = nn.out.createOutputQueue(maxSize=4, blocking=False)
+        log.info(
+            "camera %s: detection branch active (model=%s, input=%dx%d, %d classes, "
+            "confidence>=%.2f)",
+            self._cfg.id,
+            self._nn_archive_path.name,
+            nn_w,
+            nn_h,
+            len(self._nn_labels),
+            self._nn_confidence,
+        )
+        return detection_queue
+
+    def _detection_worker(self, detection_queue: Any) -> None:
+        """Background thread: drain NN results into the latest-detections snapshot.
+
+        Same lifecycle rules as the MJPEG worker: runs until
+        `self._stop_flag` is set, never touches the asyncio loop, and a
+        crash here only loses the detections overlay — recording and
+        preview are unaffected.
+        """
+        log.info("camera %s: detection worker started", self._cfg.id)
+        try:
+            while not self._stop_flag.is_set():
+                try:
+                    packet = detection_queue.get()
+                except Exception:
+                    log.exception("camera %s: detection queue read failed", self._cfg.id)
+                    break
+                if packet is None:
+                    continue
+                detections = []
+                for det in packet.detections:
+                    label = int(det.label)
+                    label_name = getattr(det, "labelName", "") or (
+                        self._nn_labels[label] if 0 <= label < len(self._nn_labels) else str(label)
+                    )
+                    detections.append(
+                        {
+                            "label": label,
+                            "label_name": label_name,
+                            "confidence": float(det.confidence),
+                            "bbox": [
+                                min(max(float(det.xmin), 0.0), 1.0),
+                                min(max(float(det.ymin), 0.0), 1.0),
+                                min(max(float(det.xmax), 0.0), 1.0),
+                                min(max(float(det.ymax), 0.0), 1.0),
+                            ],
+                        }
+                    )
+                self._latest_detections = {"ts": time.time(), "detections": detections}
+        except BaseException:
+            log.exception("camera %s: detection worker crashed", self._cfg.id)
+        finally:
+            log.info("camera %s: detection worker stopped", self._cfg.id)
 
     def _mjpeg_worker(self, preview_queue: Any) -> None:
         """Background thread: drain DepthAI's MJPEG queue, fan out to subscribers.

@@ -67,6 +67,20 @@ class _FakeCamera:
     async def stop(self) -> None:
         self.stop_count += 1
 
+    def latest_detections(self) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "ts": 1234.5,
+            "detections": [
+                {
+                    "label": 0,
+                    "label_name": "car",
+                    "confidence": 0.9,
+                    "bbox": [0.1, 0.2, 0.3, 0.4],
+                }
+            ],
+        }
+
 
 class _StubDiscoveryService:
     """Minimal stand-in that doesn't touch DepthAI.
@@ -162,6 +176,20 @@ def test_live_preview_endpoint_streams_mjpeg_for_registered_camera(
 
 def test_live_preview_endpoint_404_for_unknown_camera(stub_app: TestClient) -> None:
     resp = stub_app.get("/live/nope/preview.mjpeg")
+    assert resp.status_code == 404
+
+
+def test_live_detections_endpoint_returns_snapshot(stub_app: TestClient) -> None:
+    resp = stub_app.get("/live/front/detections")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["detections"][0]["label_name"] == "car"
+    assert body["detections"][0]["bbox"] == [0.1, 0.2, 0.3, 0.4]
+
+
+def test_live_detections_endpoint_404_for_unknown_camera(stub_app: TestClient) -> None:
+    resp = stub_app.get("/live/nope/detections")
     assert resp.status_code == 404
 
 

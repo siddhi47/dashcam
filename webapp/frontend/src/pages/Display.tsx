@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, Camera } from "../api.ts";
+import { DetectionOverlay } from "../components/DetectionOverlay.tsx";
 
 const CONTROLS_TIMEOUT_MS = 4000;
 
@@ -122,22 +123,30 @@ export function DisplayPage() {
         }}
       >
         {visibleCameras.map((cam) => (
-          <img
+          <div
             key={cam.id}
-            src={api.livePreviewUrl(cam.id)}
-            alt=""
-            onClick={(e) => {
-              e.stopPropagation();
-              handleTapFeed(cam.id);
-            }}
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              display: "block",
-              cursor: "pointer",
-            }}
-          />
+            style={{ position: "relative", overflow: "hidden" }}
+          >
+            <img
+              src={api.livePreviewUrl(cam.id)}
+              alt=""
+              onClick={(e) => {
+                e.stopPropagation();
+                handleTapFeed(cam.id);
+              }}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                display: "block",
+                cursor: "pointer",
+              }}
+            />
+            {/* YOLO bboxes. fit="cover" makes the SVG crop the same
+              * way the img does, so boxes stay glued to objects even
+              * when the tile aspect ratio crops the 16:9 stream. */}
+            <DetectionOverlay cameraId={cam.id} fit="cover" />
+          </div>
         ))}
       </div>
 

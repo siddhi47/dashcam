@@ -19,6 +19,19 @@ cameras:
     codec: h265
     bitrate_kbps: 8000
 
+detection:
+  # On-device YOLO object detection (runs on the OAK's VPU, drawn as
+  # bbox overlays in the web UI). With no model cached locally and no
+  # s3 source, capture logs a warning and records without detection.
+  enabled: true
+  confidence_threshold: 0.5
+  # model_dir: /data/dashcam/models   # default: {storage.root}/models
+  # s3:
+  #   bucket: my-models-bucket
+  #   prefix: dashcam/
+  #   region: us-east-1
+  #   # endpoint_url: http://minio.local:9000   # for S3-compatible stores
+
 webapp:
   bind: 0.0.0.0:8080
   auth:

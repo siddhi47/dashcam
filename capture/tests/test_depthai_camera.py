@@ -252,3 +252,99 @@ async def test_broadcast_preview_drops_frames_for_slow_consumer() -> None:
     # Queue is at most full; extras were dropped.
     assert slow_queue.qsize() == _PREVIEW_SUBSCRIBER_QUEUE
     cam._preview_subscribers.discard(slow_queue)
+
+
+# ---------------------------------------------------------------------------
+# Detection worker — snapshot conversion (no hardware, fake queue + packets)
+# ---------------------------------------------------------------------------
+
+
+class _FakeDetection:
+    """Duck-type for dai.ImgDetection."""
+
+    def __init__(
+        self,
+        *,
+        label: int,
+        label_name: str,
+        confidence: float,
+        bbox: tuple[float, float, float, float],
+    ) -> None:
+        self.label = label
+        self.labelName = label_name
+        self.confidence = confidence
+        self.xmin, self.ymin, self.xmax, self.ymax = bbox
+
+
+class _FakeDetectionsPacket:
+    def __init__(self, detections: list[_FakeDetection]) -> None:
+        self.detections = detections
+
+
+class _FakeDetectionQueue:
+    """Feeds canned packets, then trips the camera's stop flag."""
+
+    def __init__(self, camera: DepthAICamera, packets: list[_FakeDetectionsPacket]) -> None:
+        self._camera = camera
+        self._packets = packets
+
+    def get(self) -> _FakeDetectionsPacket | None:
+        if self._packets:
+            return self._packets.pop(0)
+        self._camera._stop_flag.set()
+        return None
+
+
+def test_latest_detections_defaults_to_disabled_empty() -> None:
+    cam = _make_camera()
+    snap = cam.latest_detections()
+    assert snap == {"enabled": False, "ts": None, "detections": []}
+
+
+def test_detection_worker_publishes_snapshot() -> None:
+    cam = _make_camera()
+    cam._detection_active = True
+    cam._nn_labels = ["car", "person"]
+
+    packet = _FakeDetectionsPacket(
+        [
+            _FakeDetection(
+                label=0,
+                label_name="car",
+                confidence=0.87,
+                bbox=(0.1, 0.2, 0.5, 0.6),
+            ),
+            # Out-of-range coords must be clamped; empty labelName must
+            # fall back to the class list.
+            _FakeDetection(
+                label=1,
+                label_name="",
+                confidence=0.5,
+                bbox=(-0.2, 0.0, 1.3, 0.9),
+            ),
+        ]
+    )
+    cam._detection_worker(_FakeDetectionQueue(cam, [packet]))
+
+    snap = cam.latest_detections()
+    assert snap["enabled"] is True
+    assert snap["ts"] is not None
+    dets = snap["detections"]
+    assert len(dets) == 2
+    assert dets[0]["label_name"] == "car"
+    assert dets[0]["confidence"] == pytest.approx(0.87)
+    assert dets[0]["bbox"] == [0.1, 0.2, 0.5, 0.6]
+    assert dets[1]["label_name"] == "person"
+    assert dets[1]["bbox"] == [0.0, 0.0, 1.0, 0.9]
+
+
+def test_detection_worker_label_falls_back_to_numeric_when_unknown() -> None:
+    cam = _make_camera()
+    cam._detection_active = True
+    cam._nn_labels = []
+
+    packet = _FakeDetectionsPacket(
+        [_FakeDetection(label=7, label_name="", confidence=0.6, bbox=(0.1, 0.1, 0.2, 0.2))]
+    )
+    cam._detection_worker(_FakeDetectionQueue(cam, [packet]))
+    assert cam.latest_detections()["detections"][0]["label_name"] == "7"

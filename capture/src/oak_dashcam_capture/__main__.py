@@ -19,6 +19,7 @@ from oak_dashcam_capture.camera import Camera
 from oak_dashcam_capture.depthai_camera import DepthAICamera
 from oak_dashcam_capture.discovery import DiscoveryService, create_discovery_app
 from oak_dashcam_capture.mock import MockCamera
+from oak_dashcam_capture.model_store import resolve_model
 from oak_dashcam_capture.retention import RetentionManager
 from oak_dashcam_capture.segments import SegmentWriter
 from oak_dashcam_capture.sinks import FfmpegMp4Sink, RawBitstreamSink, SegmentSink
@@ -57,6 +58,8 @@ def _build_camera(
     use_mock: bool,
     camera_store: CameraStore | None = None,
     boot_lock: asyncio.Lock | None = None,
+    nn_archive_path: Path | None = None,
+    nn_confidence_threshold: float = 0.5,
 ) -> Camera:
     if use_mock:
         return MockCamera(
@@ -94,7 +97,13 @@ def _build_camera(
 
         callback = _on_resolved
 
-    return DepthAICamera(cam_cfg, on_device_resolved=callback, boot_lock=boot_lock)
+    return DepthAICamera(
+        cam_cfg,
+        on_device_resolved=callback,
+        boot_lock=boot_lock,
+        nn_archive_path=nn_archive_path,
+        nn_confidence_threshold=nn_confidence_threshold,
+    )
 
 
 def resolve_auto_mxids(cameras: list[CameraConfig]) -> list[CameraConfig]:
@@ -168,6 +177,7 @@ def build_supervisors(
     camera_store: CameraStore | None = None,
     camera_registry: dict[str, Camera] | None = None,
     boot_lock: asyncio.Lock | None = None,
+    nn_archive_path: Path | None = None,
 ) -> list[CameraSupervisor]:
     """Construct one supervisor per configured camera.
 
@@ -182,6 +192,10 @@ def build_supervisors(
     at a time. This prevents the USB-contention race that causes
     "Failed to boot device!" when two OAKs try to initialize
     simultaneously on the Pi 4's shared USB controller.
+
+    `nn_archive_path` is the resolved YOLO NNArchive from
+    `model_store.resolve_model` (None → no detection). Every camera
+    runs the same model.
     """
     use_mock = _should_use_mock()
     # Prefer `cameras_override` (DB-backed) when the caller provides it; the
@@ -192,7 +206,12 @@ def build_supervisors(
     supervisors: list[CameraSupervisor] = []
     for cam_cfg in cameras:
         camera = _build_camera(
-            cam_cfg, use_mock=use_mock, camera_store=camera_store, boot_lock=boot_lock
+            cam_cfg,
+            use_mock=use_mock,
+            camera_store=camera_store,
+            boot_lock=boot_lock,
+            nn_archive_path=nn_archive_path,
+            nn_confidence_threshold=config.detection.confidence_threshold,
         )
         if camera_registry is not None and isinstance(camera, DepthAICamera):
             camera_registry[cam_cfg.id] = camera
@@ -281,6 +300,13 @@ async def _main_async(config: DashcamConfig) -> None:
     # (or both) fail with "Failed to boot device!" — especially bad
     # when mixing OAK-D (3-sensor, heavy boot) with OAK-1.
     boot_lock = asyncio.Lock()
+    # Resolve the YOLO detection model before any camera boots: check
+    # the configured S3 bucket for the newest NNArchive, download it if
+    # it isn't cached yet, otherwise fall back to whatever is already
+    # in the local model dir. Runs in a thread because boto3 is
+    # blocking; any failure inside degrades to "no detection" with a
+    # warning — it never blocks recording.
+    nn_archive_path = await asyncio.to_thread(resolve_model, config.detection, config.storage.root)
     supervisors = build_supervisors(
         config,
         index=index,
@@ -288,6 +314,7 @@ async def _main_async(config: DashcamConfig) -> None:
         camera_store=camera_store,
         camera_registry=camera_registry,
         boot_lock=boot_lock,
+        nn_archive_path=nn_archive_path,
     )
     retention = RetentionManager(
         root=config.storage.root,

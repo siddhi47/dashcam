@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, Camera } from "../api.ts";
+import { DetectionOverlay } from "../components/DetectionOverlay.tsx";
 
 // How long we disable the Reset/Rotate buttons after a click, and how
 // long to wait before we force the <img> to reconnect to the preview URL.
@@ -147,18 +148,23 @@ export function LivePage() {
                * (unmount / tab switch / reset / rotate) closes the connection
                * and the capture service drops the subscriber.
                */}
-              <img
-                key={imgKey}
-                src={imgSrc}
-                alt={`${cam.id} live preview`}
-                style={{
-                  width: "100%",
-                  display: "block",
-                  background: "#000",
-                  aspectRatio: "16 / 9",
-                  objectFit: "cover",
-                }}
-              />
+              <div style={{ position: "relative" }}>
+                <img
+                  key={imgKey}
+                  src={imgSrc}
+                  alt={`${cam.id} live preview`}
+                  style={{
+                    width: "100%",
+                    display: "block",
+                    background: "#000",
+                    aspectRatio: "16 / 9",
+                    objectFit: "cover",
+                  }}
+                />
+                {/* YOLO bbox overlay — renders nothing when detection
+                  * is disabled on the capture side. */}
+                <DetectionOverlay cameraId={cam.id} fit="cover" />
+              </div>
               <div
                 style={{
                   padding: "8px 16px 12px",

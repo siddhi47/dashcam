@@ -243,6 +243,25 @@ def create_discovery_app(service: DiscoveryService) -> FastAPI:
             media_type=f"multipart/x-mixed-replace; boundary={_MJPEG_BOUNDARY}",
         )
 
+    @app.get("/live/{camera_id}/detections")
+    async def live_detections(camera_id: str) -> dict[str, Any]:
+        """Latest YOLO detections for a running camera.
+
+        Returns the most recent snapshot published by the camera's
+        detection worker — `{"enabled", "ts", "detections"}` with
+        bboxes normalized to the full preview frame. The frontend
+        polls this and draws the boxes as an overlay on the MJPEG
+        stream; `enabled: false` (no model loaded) tells it to stop
+        polling. Cheap: no DepthAI calls, just a dict read.
+        """
+        camera = service.get_camera(camera_id)
+        if camera is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"camera {camera_id!r} is not currently running",
+            )
+        return camera.latest_detections()
+
     @app.post("/live/{camera_id}/reset")
     async def reset_camera(camera_id: str) -> dict[str, str]:
         """Stop a running camera's pipeline so its supervisor restarts it.

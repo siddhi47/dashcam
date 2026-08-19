@@ -42,6 +42,21 @@ export interface Segment {
   protected: boolean;
 }
 
+export interface Detection {
+  label: number;
+  label_name: string;
+  confidence: number;
+  /** [xmin, ymin, xmax, ymax], normalized 0..1 over the full 16:9 frame. */
+  bbox: [number, number, number, number];
+}
+
+export interface DetectionsResponse {
+  /** false when no YOLO model is loaded on the capture side. */
+  enabled: boolean;
+  ts: number | null;
+  detections: Detection[];
+}
+
 export interface DiscoveredCamera {
   mxid: string;
   assigned: boolean;
@@ -115,6 +130,11 @@ export const api = {
 
   livePreviewUrl: (cameraId: string) =>
     `/api/live/${encodeURIComponent(cameraId)}/preview.mjpeg`,
+
+  getDetections: (cameraId: string) =>
+    request<DetectionsResponse>(
+      `/api/live/${encodeURIComponent(cameraId)}/detections`,
+    ),
 
   resetCamera: (cameraId: string) =>
     request<{ status: string; camera_id: string }>(

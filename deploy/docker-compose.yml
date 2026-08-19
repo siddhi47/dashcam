@@ -20,6 +20,15 @@ services:
     # it can talk to any USB device hot-plugged into the host. On macOS
     # Docker Desktop this is a no-op and the dev-override drops it.
     privileged: true
+    # AWS credentials for the detection-model S3 sync (detection.s3 in
+    # dashcam.yaml). Passed through from the host environment / a .env
+    # file next to this compose file — never hardcoded here. Empty
+    # values are harmless: model sync just falls back to the locally
+    # cached model with a warning.
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     volumes:
       - ../deploy/dashcam.docker.yaml:/config/dashcam.yaml:ro
       # Recordings + SQLite DB live on the microSD root filesystem at

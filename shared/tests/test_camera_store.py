@@ -133,9 +133,7 @@ def test_rotation_rejects_90_and_270() -> None:
         CameraConfig(id="front", role=CameraRole.FRONT, rotation_degrees=270)  # type: ignore[arg-type]
     # Sanity: 0 and 180 are accepted.
     assert CameraConfig(id="a", role=CameraRole.FRONT, rotation_degrees=0).rotation_degrees == 0
-    assert (
-        CameraConfig(id="b", role=CameraRole.FRONT, rotation_degrees=180).rotation_degrees == 180
-    )
+    assert CameraConfig(id="b", role=CameraRole.FRONT, rotation_degrees=180).rotation_degrees == 180
 
 
 def test_rotation_migration_adds_column_to_old_db(tmp_path: Path) -> None:

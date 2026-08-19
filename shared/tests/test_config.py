@@ -31,3 +31,37 @@ def test_duplicate_camera_ids_rejected() -> None:
 def test_bad_camera_id_rejected() -> None:
     with pytest.raises(ValueError, match="slug"):
         DashcamConfig.model_validate({"cameras": [{"id": "not a slug", "role": "front"}]})
+
+
+def test_detection_defaults() -> None:
+    cfg = DashcamConfig.model_validate({"cameras": [{"id": "a", "role": "front"}]})
+    assert cfg.detection.enabled is True
+    assert cfg.detection.s3 is None
+    assert cfg.detection.model_dir is None
+    assert cfg.detection.confidence_threshold == 0.5
+
+
+def test_detection_s3_section_parses() -> None:
+    cfg = DashcamConfig.model_validate(
+        {
+            "cameras": [{"id": "a", "role": "front"}],
+            "detection": {
+                "confidence_threshold": 0.7,
+                "s3": {"bucket": "models", "prefix": "dashcam/", "region": "us-east-1"},
+            },
+        }
+    )
+    assert cfg.detection.s3 is not None
+    assert cfg.detection.s3.bucket == "models"
+    assert cfg.detection.s3.endpoint_url is None
+    assert cfg.detection.confidence_threshold == 0.7
+
+
+def test_detection_confidence_bounds_enforced() -> None:
+    with pytest.raises(ValueError):
+        DashcamConfig.model_validate(
+            {
+                "cameras": [{"id": "a", "role": "front"}],
+                "detection": {"confidence_threshold": 1.5},
+            }
+        )

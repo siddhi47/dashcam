@@ -22,6 +22,19 @@ cameras:
     codec: h265
     bitrate_kbps: 8000
 
+detection:
+  # On-device YOLO detection. No s3 source configured yet — capture
+  # will use whatever NNArchive is cached in /data/dashcam/models, or
+  # log a warning and run without detection if there is none. To pull
+  # models from S3, fill in the s3 block and provide AWS credentials
+  # via the environment (see docker-compose.yml).
+  enabled: true
+  confidence_threshold: 0.5
+  # s3:
+  #   bucket: my-models-bucket
+  #   prefix: dashcam/
+  #   region: us-east-1
+
 webapp:
   bind: 0.0.0.0:8080
   auth:

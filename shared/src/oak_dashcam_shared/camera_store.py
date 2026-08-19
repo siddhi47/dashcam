@@ -53,9 +53,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(cameras)")}
     if "rotation_degrees" not in existing:
-        conn.execute(
-            "ALTER TABLE cameras ADD COLUMN rotation_degrees INTEGER NOT NULL DEFAULT 0"
-        )
+        conn.execute("ALTER TABLE cameras ADD COLUMN rotation_degrees INTEGER NOT NULL DEFAULT 0")
 
 
 class CameraStore:

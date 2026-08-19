@@ -48,6 +48,12 @@ python_version = "3.11"
 strict = true
 files = ["shared/src", "capture/src"]
 
+# boto3 ships no type stubs; the model-store module keeps its S3
+# client typed as Any (it's injectable for tests anyway).
+[[tool.mypy.overrides]]
+module = ["boto3"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["shared/tests", "capture/tests", "webapp/backend/tests"]
 asyncio_mode = "auto"

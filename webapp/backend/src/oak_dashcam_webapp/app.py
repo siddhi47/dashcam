@@ -322,9 +322,7 @@ def create_app(
         """
         cam = store.get(camera_id)
         if cam is None:
-            raise HTTPException(
-                status_code=404, detail=f"camera {camera_id!r} not found"
-            )
+            raise HTTPException(status_code=404, detail=f"camera {camera_id!r} not found")
         new_rotation = 0 if cam.rotation_degrees == 180 else 180
         updated = cam.model_copy(update={"rotation_degrees": new_rotation})
         store.update(updated)
@@ -405,6 +403,29 @@ def create_app(
         return StreamingResponse(
             _relay_live(),
             media_type="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    @app.get("/api/live/{camera_id}/detections")
+    async def live_detections(camera_id: str) -> Response:
+        """Proxy the latest YOLO detections snapshot from the capture sidecar.
+
+        Polled by the frontend at a few Hz to overlay bboxes on the
+        live MJPEG preview, so keep the timeout short — a stale
+        answer is worse than a missed poll.
+        """
+        url = f"{discovery_url}/live/{camera_id}/detections"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url)
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"capture sidecar unreachable at {url}: {exc}",
+            ) from exc
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=resp.headers.get("content-type", "application/json"),
         )
 
     # ---------------------------------------------------------- system
